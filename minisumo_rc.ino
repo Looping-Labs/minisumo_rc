@@ -12,6 +12,8 @@ using namespace MotorControl;
 const uint16_t FREQUENCY = 10000; // PWM frequency 10kHz
 const uint8_t RESOLUTION = 10;    // PWM resolution 10 bits (0-1023)
 const uint8_t CHANNEL = 0;        // PWM channel number (0-15)
+const uint16_t MAX_SPEED = 1023;  // Maximum speed (0-1023)
+const uint16_t MIN_SPEED = 0;     // Minimum speed (0-1023)
 
 // Create motor controller objects
 MotorController r_motor(R_MOTOR_IN1, R_MOTOR_IN2, R_MOTOR_PWM, CHANNEL);
@@ -20,7 +22,7 @@ MotorController l_motor(L_MOTOR_IN1, L_MOTOR_IN2, L_MOTOR_PWM, CHANNEL);
 enum CONTROL_TYPE {
   RC = 0,
   APP
-}
+};
 
 void setup() {
   Serial.begin(115200); // Initialize serial communication
@@ -41,5 +43,6 @@ void setup() {
 }
 
 void loop() {
-  
+  r_motor.motorGo(MAX_SPEED); // 1023/1023 = 100%
+  l_motor.motorGo(MAX_SPEED); // 1023/1023 = 100%
 }
