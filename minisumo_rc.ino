@@ -22,7 +22,7 @@ using namespace MotorControl;
 #define ACTIONS_DEFAULT 0X0000 // ACTIONS DEFAULT value
 #define LED_CONNECTED 2        // LED pin for connected gamepad
 
-const uint8_t FORGET_GAMEPAD_PIN = 13; // Forget gamepad
+// Define motor control parameters
 const uint16_t FREQUENCY = 10000;      // PWM frequency 10kHz
 const uint8_t RESOLUTION = 10;         // PWM resolution 10 bits (0-1023)
 const uint8_t CHANNEL = 0;             // PWM channel number (0-15)
@@ -30,16 +30,28 @@ const uint16_t MAX_PWM = 1023;         // Maximum speed (0-1023)
 const uint8_t MIN_PWM = 150;           // Minimum speed (0-1023)
 const uint8_t MOTORS_OFFSET = 150;     // Motor driver offset 170 to start
 
+// Define gamepad parameters
+const uint8_t FORGET_GAMEPAD_PIN = 13; // Forget gamepad pin (input)
 const uint16_t MAX_THROTTLE = 1020;    // Maximum throttle value (0-1020)
 const uint8_t MIN_THROTTLE = 0;        // Minimum throttle value (0-1020)
 const uint16_t MAX_BRAKE = 1020;       // Maximum brake value (0-1020)
 const uint8_t MIN_BRAKE = 0;           // Minimum brake value (0-1020)
+const int16_t MIN_LEFT_STICK_X = -508;  // Minimum left stick X-axis value (0-(-508))
+const uint16_t MAX_LEFT_STICK_X = 512;   // Maximum left stick X-axis value (0-512)
+const uint8_t LEFT_STICK_X_OFFSET = 4;   // Left stick offset X value = 4
+const uint8_t LEFT_STICK_Y_OFFSET = 4;   // Left stick offset Y value = 4
+
+// Define gamepad variables
+uint16_t throttle_value = 0;           // Throttle value (0-1020)
+uint16_t brake_value = 0;              // Brake value (0-1020)
+int16_t left_stick_x = 0;              // Left stick X-axis value (0-1020)
+uint16_t dpad = 0x00;                  // D-PAD value (0x00-0x08)
 
 // Create motor controller objects
 MotorController r_motor(R_MOTOR_IN1, R_MOTOR_IN2, R_MOTOR_PWM, CHANNEL);
 MotorController l_motor(L_MOTOR_IN1, L_MOTOR_IN2, L_MOTOR_PWM, CHANNEL);
 
-ControllerPtr ps4[BP32_MAX_GAMEPADS];
+ControllerPtr gamepads[BP32_MAX_GAMEPADS];
 
 enum CONTROL_TYPE {
   RC = 0,
@@ -48,6 +60,7 @@ enum CONTROL_TYPE {
 
 void setup() {
   Serial.begin(115200);                      // Initialize serial communication
+  delay(1000);                               // Wait for serial monitor to open. Only use for debugging 
   pinMode(FORGET_GAMEPAD_PIN, INPUT_PULLUP); // Set pin for forgetting gamepad
   pinMode(LED_CONNECTED, OUTPUT);            // Set pin for LED indication
 
@@ -76,7 +89,7 @@ void setup() {
 
   // Setup the Bluepad32 callbacks
   BP32.setup(&onConnectedController, &onDisconnectedController);
-
+  BP32.forgetBluetoothKeys();
   // TODO: Uncomment the following lines to enable gamepad forgetting functionality
   // bool forgetState = digitalRead(FORGET_GAMEPAD_PIN);
   // if(!forgetState) {
@@ -88,20 +101,30 @@ void setup() {
 }
 
 void loop() {
- r_motor.motorGo(1023);
- l_motor.motorGo(1023);
+  BP32.update();
+
+  for (int i = 0; i < BP32_MAX_CONTROLLERS; i++) {
+    ControllerPtr ps4 = gamepads[i];
+
+    if (ps4 && ps4->isConnected()) {
+      if (ps4->isGamepad())
+        processGamepad(ps4);
+    }
+  }
+
+  delay(150);
 }
 
 void onConnectedController(ControllerPtr ctl) {
   bool foundEmptySlot = false;
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
-    if (ps4[i] == nullptr) {
+    if (gamepads[i] == nullptr) {
       Serial.printf("CALLBACK: Controller is connected, index=%d\n", i);
       digitalWrite(LED_CONNECTED, HIGH); // Turn on LED when a controller is connected
 
       ControllerProperties properties = ctl->getProperties();
       Serial.printf("Controller model: %s, VID=0x%04x, PID=0x%04x\n", ctl->getModelName().c_str(), properties.vendor_id, properties.product_id);
-      ps4[i] = ctl;
+      gamepads[i] = ctl;
       foundEmptySlot = true;
       break;
     }
@@ -119,9 +142,9 @@ void onDisconnectedController(ControllerPtr ctl) {
   digitalWrite(LED_CONNECTED, LOW); // Turn off LED when a controller is disconnected
 
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
-    if (ps4[i] == ctl) {
+    if (gamepads[i] == ctl) {
       Serial.printf("CALLBACK: Controller disconnected from index=%d\n", i);
-      ps4[i] = nullptr;
+      gamepads[i] = nullptr;
       foundController = true;
       break;
     }
@@ -129,5 +152,21 @@ void onDisconnectedController(ControllerPtr ctl) {
 
   if (!foundController) {
     Serial.println("CALLBACK: Controller disconnected, but not found in myControllers");
+    r_motor.softStop();
+    l_motor.softStop();
+    digitalWrite(LED_CONNECTED, LOW); // Turn off LED when a controller is disconnected
   }
+}
+
+void processGamepad(ControllerPtr gamepad) {
+  throttle_value = gamepad->throttle();
+  brake_value = gamepad->brake();
+  left_stick_x = gamepad->axisX();
+  dpad = gamepad->dpad();
+                       
+  uint16_t map_throttle = map(throttle_value, MIN_THROTTLE, MAX_THROTTLE, MIN_PWM, MAX_PWM);             // Map throttle value to PWM range [0 - 1020] to [0 - 1023]
+  uint16_t map_brake = map(brake_value, MIN_BRAKE, MAX_BRAKE, MIN_PWM, MAX_PWM);                         // Map brake value to PWM range [0 - 1020] to [0 - 1023]
+  int16_t map_left_stick_x = map(left_stick_x, MIN_LEFT_STICK_X, MAX_LEFT_STICK_X, -MAX_PWM, MAX_PWM);   // Map left stick X-axis value to PWM range [0 - 1020] to [-1023 - 1023]
+
+  Serial.println("Thtottle: " + String(map_throttle) + ", Brake: " + String(map_brake) + ", Left stick X: " + String(map_left_stick_x));
 }
