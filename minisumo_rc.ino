@@ -39,13 +39,18 @@ const uint8_t MIN_BRAKE = 0;           // Minimum brake value (0-1020)
 const int16_t MIN_LEFT_STICK_X = -508;  // Minimum left stick X-axis value (0-(-508))
 const uint16_t MAX_LEFT_STICK_X = 512;   // Maximum left stick X-axis value (0-512)
 const uint8_t LEFT_STICK_X_OFFSET = 4;   // Left stick offset X value = 4
-const uint8_t LEFT_STICK_Y_OFFSET = 4;   // Left stick offset Y value = 4
+const uint8_t DEADBAND_VALUE = 20;   // Deadband value for stick, throttle, and brake
 
 // Define gamepad variables
 uint16_t throttle_value = 0;           // Throttle value (0-1020)
 uint16_t brake_value = 0;              // Brake value (0-1020)
 int16_t left_stick_x = 0;              // Left stick X-axis value (0-1020)
 uint16_t dpad = 0x00;                  // D-PAD value (0x00-0x08)
+
+// Exponential steering variables
+const float STEERING_EXPONENT = 2.0; // Change this value to adjust the steering sensitivity. Higher values make steering more precise to center, more agressive at the extremes
+const uint8_t MAX_ACCELERATION = 30; // Maximum change in PWM per loop cycle
+const uint8_t MAX_STEERING_ACCELERATION = 40; // Maximum change in steering-induced PWM difference per cycle
 
 // Create motor controller objects
 MotorController r_motor(R_MOTOR_IN1, R_MOTOR_IN2, R_MOTOR_PWM, CHANNEL);
@@ -163,10 +168,87 @@ void processGamepad(ControllerPtr gamepad) {
   brake_value = gamepad->brake();
   left_stick_x = gamepad->axisX();
   dpad = gamepad->dpad();
+
+  // Apply deadband to throttle and brake values
+  throttle_value = applyDeadband(throttle_value, DEADBAND_VALUE, 0);                                     // Apply deadband to throttle value
+  brake_value = applyDeadband(brake_value, DEADBAND_VALUE, 0);                                           // Apply deadband to brake value
+  left_stick_x = applyDeadband(left_stick_x, DEADBAND_VALUE, LEFT_STICK_X_OFFSET);                       // Apply deadband to left stick X-axis value
                        
-  uint16_t map_throttle = map(throttle_value, MIN_THROTTLE, MAX_THROTTLE, MIN_PWM, MAX_PWM);             // Map throttle value to PWM range [0 - 1020] to [0 - 1023]
-  uint16_t map_brake = map(brake_value, MIN_BRAKE, MAX_BRAKE, MIN_PWM, MAX_PWM);                         // Map brake value to PWM range [0 - 1020] to [0 - 1023]
+  uint16_t forward_pwm = map(throttle_value, MIN_THROTTLE, MAX_THROTTLE, MIN_PWM, MAX_PWM);              // Map throttle value to PWM range [0 - 1020] to [0 - 1023]
+  uint16_t reverse_pwm = map(brake_value, MIN_BRAKE, MAX_BRAKE, MIN_PWM, MAX_PWM);                       // Map brake value to PWM range [0 - 1020] to [0 - 1023]
   int16_t map_left_stick_x = map(left_stick_x, MIN_LEFT_STICK_X, MAX_LEFT_STICK_X, -MAX_PWM, MAX_PWM);   // Map left stick X-axis value to PWM range [0 - 1020] to [-1023 - 1023]
 
+  uint16_t steering_value = applyExponentialSteering(map_left_stick_x, STEERING_EXPONENT, MAX_PWM);      // Apply exponential response to steering for better control feel
+
+  // Determine if we're going forward, backward, or stopped
+  int16_t base_pwm = 0;
+  base_pwm = getDirection(throttle_value, brake_value, base_pwm); 
+
+  // Apply proportional steering (more effect at higher speeds)
+  float speed_factor = static_cast<float>(abs(base_pwm)) / MAX_PWM;
+  int16_t steering_pwm = static_cast<int16_t>(steering_value * speed_factor);
+
+  // Calculate the raw PWM values for each motor
+
   Serial.println("Thtottle: " + String(map_throttle) + ", Brake: " + String(map_brake) + ", Left stick X: " + String(map_left_stick_x));
+}
+
+/**
+ * @brief This function applies a deadband to the given value by the joystick
+ * 
+ * @param value: The value given by the joystick
+ * @param deadband_threshold: The deadband threshold value 
+ * @param center_offset: The center offset value 
+ * @return int16_t 
+ */
+int16_t applyDeadband(int16_t value, int8_t deadband_threshold, int8_t center_offset) {
+  // Apply offset correction
+  value -= center_offset;
+
+  // Apply deadband
+  if(abs(value) < deadband_threshold) {
+    return 0; // Deadband applied
+  } else {
+    // Return the value, keeping the sign but adjusting for the deadband threshold
+    // This ensures there's no "jump" when crossing the deadband
+    return (value > 0) ? (value - deadband_threshold) : (value + deadband_threshold);
+  }
+}
+
+/**
+ * @brief This function applies an exponential curve to the given value
+ * 
+ * @param value: The value given by the joystick
+ * @param exponent: The exponent value for the exponential curve
+ * @param max_value: The maximum value for the joystick
+ * @return int16_t 
+ */
+int16_t applyExponentialSteering(in16_t value, float exponent, int16_t max_value) {
+  // Normalize to -1.0 to 1.0
+  float normalized_value = static_cast<float>(value) / max_value;
+  // Apply exponential curve while keeping the sign
+  // float exponential = pow(abs(normalized), exponent) * (normalized >= 0 ? 1.0 : -1.0);
+  float exp_value = copysign(pow(abs(normalized_value), exponent), normalized_value);
+  // Scale back to original range
+  return static_cast<int16_t>(exp_value * max_value);
+}
+
+/**
+ * @brief This function determines the direction of the motors based on throttle and brake values
+ * 
+ * @param throttle_value: The value given by the throttle
+ * @param brake_value: The value given by the brake
+ * @param base_pwm: The base PWM value for the motors
+ * @return int16_t 
+ */
+int16_t getDirection(uint16_t throttle_value, uint16_t brake_value, int16_t base_pwm) {
+  if(throttle_value > brake_value) {
+    base_pwm = forward_pwm;
+  } else if(brake_value > throttle_value) {
+    base_pwm = -reverse_pwm;
+  } else {
+    base_pwm = 0; 
+  }
+
+  return base_pwm;
 }
