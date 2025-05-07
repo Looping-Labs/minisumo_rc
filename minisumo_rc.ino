@@ -43,7 +43,7 @@ const uint8_t DEADBAND_VALUE = 20;   // Deadband value for stick, throttle, and 
 
 // Define gamepad variables
 uint16_t throttle_value = 0;           // Throttle value (0-1020)
-uint16_t brake_value = 0;              // Brake value (0-1020)
+int16_t brake_value = 0;              // Brake value (0-1020)
 int16_t left_stick_x = 0;              // Left stick X-axis value (0-1020)
 uint16_t dpad = 0x00;                  // D-PAD value (0x00-0x08)
 
@@ -175,22 +175,54 @@ void processGamepad(ControllerPtr gamepad) {
   left_stick_x = applyDeadband(left_stick_x, DEADBAND_VALUE, LEFT_STICK_X_OFFSET);                       // Apply deadband to left stick X-axis value
                        
   uint16_t forward_pwm = map(throttle_value, MIN_THROTTLE, MAX_THROTTLE, MIN_PWM, MAX_PWM);              // Map throttle value to PWM range [0 - 1020] to [0 - 1023]
-  uint16_t reverse_pwm = map(brake_value, MIN_BRAKE, MAX_BRAKE, MIN_PWM, MAX_PWM);                       // Map brake value to PWM range [0 - 1020] to [0 - 1023]
+  int16_t reverse_pwm = map(brake_value, MIN_BRAKE, MAX_BRAKE, MIN_PWM, -MAX_PWM);                       // Map brake value to PWM range [0 - 1020] to [0 - 1023]
   int16_t map_left_stick_x = map(left_stick_x, MIN_LEFT_STICK_X, MAX_LEFT_STICK_X, -MAX_PWM, MAX_PWM);   // Map left stick X-axis value to PWM range [0 - 1020] to [-1023 - 1023]
 
-  uint16_t steering_value = applyExponentialSteering(map_left_stick_x, STEERING_EXPONENT, MAX_PWM);      // Apply exponential response to steering for better control feel
+  int16_t steering_value = applyExponentialSteering(map_left_stick_x, STEERING_EXPONENT, MAX_PWM);      // Apply exponential response to steering for better control feel
 
-  // Determine if we're going forward, backward, or stopped
+  // // Determine if we're going forward, backward, or stopped
   int16_t base_pwm = 0;
-  base_pwm = getDirection(throttle_value, brake_value, base_pwm); 
+  base_pwm = getDirection(throttle_value, brake_value, base_pwm, forward_pwm, reverse_pwm); 
 
   // Apply proportional steering (more effect at higher speeds)
   float speed_factor = static_cast<float>(abs(base_pwm)) / MAX_PWM;
-  int16_t steering_pwm = static_cast<int16_t>(steering_value * speed_factor);
+  int16_t scaled_steering = static_cast<int16_t>(steering_value * speed_factor);
 
   // Calculate the raw PWM values for each motor
+  int16_t raw_left_pwm = 0;
+  int16_t raw_right_pwm = 0;
 
-  Serial.println("Thtottle: " + String(map_throttle) + ", Brake: " + String(map_brake) + ", Left stick X: " + String(map_left_stick_x));
+  if(base_pwm > 0) {
+    raw_left_pwm = base_pwm + scaled_steering;
+    raw_right_pwm = base_pwm - scaled_steering;
+  } else {
+    raw_left_pwm = base_pwm - scaled_steering;
+    raw_right_pwm = base_pwm + scaled_steering;
+  }
+
+  // // Preserve steering ratio if motors exceed limits
+  if(abs(raw_left_pwm) > MAX_PWM || abs(raw_right_pwm) > MAX_PWM) {
+    // Determine which motor is exceeding the limit
+    float left_excess = static_cast<float>(abs(raw_left_pwm)) / MAX_PWM;
+    float right_excess = static_cast<float>(abs(raw_right_pwm)) / MAX_PWM;
+    float scale_factor = 1.0 / max(left_excess, right_excess);
+
+    // Scale both motors to maintain the steering ratio
+    raw_left_pwm *= scale_factor;
+    raw_right_pwm *= scale_factor;
+  }
+
+  // Constrain the PWM values to the valid range
+  raw_left_pwm = constrain(raw_left_pwm, -MAX_PWM, MAX_PWM);
+  raw_right_pwm = constrain(raw_right_pwm, -MAX_PWM, MAX_PWM);
+
+  // Serial.println("Thtottle: " + String(throttle_value) + ", Brake: " + String(brake_value) + ", Left stick X: " + String(map_left_stick_x) + " left_pwm: " + String(raw_left_pwm) + ", right_pwm: " + String(raw_right_pwm));
+
+  Serial.println("Throttle: " + String(throttle_value) + ", Brake: " + String(brake_value) + ", Left stick X: " + String(map_left_stick_x) + " left_pwm: " + String(raw_left_pwm) + ", right_pwm: " + String(raw_right_pwm) + ", base_pwm: " + String(base_pwm));
+
+  //TODO: correct the pwm values of each motor, they are inverted left to right. 
+  //TODO: The joystick offset is giving -5. When joystick moves to the left, the value is always 1023 in the left motor.
+  //TODO: The sign of pwm values is always positive, so the motors are always going forward.
 }
 
 /**
@@ -203,7 +235,7 @@ void processGamepad(ControllerPtr gamepad) {
  */
 int16_t applyDeadband(int16_t value, int8_t deadband_threshold, int8_t center_offset) {
   // Apply offset correction
-  value -= center_offset;
+  (value > 0) ? value -= center_offset : value += center_offset;
 
   // Apply deadband
   if(abs(value) < deadband_threshold) {
@@ -223,7 +255,7 @@ int16_t applyDeadband(int16_t value, int8_t deadband_threshold, int8_t center_of
  * @param max_value: The maximum value for the joystick
  * @return int16_t 
  */
-int16_t applyExponentialSteering(in16_t value, float exponent, int16_t max_value) {
+int16_t applyExponentialSteering(int16_t value, float exponent, int16_t max_value) {
   // Normalize to -1.0 to 1.0
   float normalized_value = static_cast<float>(value) / max_value;
   // Apply exponential curve while keeping the sign
@@ -241,14 +273,13 @@ int16_t applyExponentialSteering(in16_t value, float exponent, int16_t max_value
  * @param base_pwm: The base PWM value for the motors
  * @return int16_t 
  */
-int16_t getDirection(uint16_t throttle_value, uint16_t brake_value, int16_t base_pwm) {
+int16_t getDirection(uint16_t throttle_value, uint16_t brake_value, int16_t base_pwm, uint16_t forward_pwm, uint16_t reverse_pwm) {
   if(throttle_value > brake_value) {
     base_pwm = forward_pwm;
   } else if(brake_value > throttle_value) {
-    base_pwm = -reverse_pwm;
+    base_pwm = reverse_pwm;
   } else {
-    base_pwm = 0; 
+    base_pwm = 0;  
   }
-
   return base_pwm;
 }
