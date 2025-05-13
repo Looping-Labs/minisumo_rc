@@ -1,6 +1,6 @@
 #include <Bluepad32.h>
-#include <MotorController.h>
 #include "minisumo_rc.h"
+#include <MotorController.h>
 
 using namespace MotorControl;
 
@@ -10,11 +10,18 @@ MotorController left_motor(L_MOTOR_IN1, L_MOTOR_IN2, L_MOTOR_PWM, L_CHANNEL);
 
 ControllerPtr gamepads[BP32_MAX_GAMEPADS];
 
+TaskHandle_t ledGamepadStatusTask = NULL; 
+
 void setup() {
   Serial.begin(115200);                      // Initialize serial communication
   delay(1000);                               // Wait for serial monitor to open. Only use for debugging
   pinMode(FORGET_GAMEPAD_PIN, INPUT_PULLUP); // Set pin for forgetting gamepad
-  pinMode(LED_CONNECTED, OUTPUT);            // Set pin for LED indication
+  // pinMode(LED_CONNECTED, OUTPUT);            // Set pin for LED indication
+
+  // Configurar el LED con PWM en vez de digital
+  ledcSetup(LED_PWM_CHANNEL, LED_PWM_FREQ, LED_PWM_RESOLUTION);
+  ledcAttachPin(LED_CONNECTED, LED_PWM_CHANNEL);
+  ledcWrite(LED_PWM_CHANNEL, 0); // Inicialmente apagado
 
   if (!right_motor.begin(FREQUENCY, RESOLUTION)) {
     Serial.println("Failed to initialize right motor controller!");
@@ -27,6 +34,15 @@ void setup() {
     while (1)
       ; // Don't continue if initialization failed
   }
+
+  xTaskCreatePinnedToCore(
+      ledStatusTask,         /* Function to implement the task */
+      "led_status_task",     /* Name of the task */
+      2048,                  /* Stack size in words */
+      NULL,                  /* Task input parameter */
+      1,                     /* Priority of the task */
+      &ledGamepadStatusTask, /* Task handle. */
+      0);                    /* Core where the task should run */
 
   Serial.printf("Firmware: %s\n", BP32.firmwareVersion());
   const uint8_t *addr = BP32.localBdAddress();
@@ -72,8 +88,8 @@ void onConnectedController(ControllerPtr ctl) {
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
     if (gamepads[i] == nullptr) {
       Serial.printf("CALLBACK: Controller is connected, index=%d\n", i);
-      digitalWrite(LED_CONNECTED, HIGH); // Turn on LED when a controller is connected
-
+      gamepad_status = CONNECTED;
+      
       ControllerProperties properties = ctl->getProperties();
       Serial.printf("Controller model: %s, VID=0x%04x, PID=0x%04x\n", ctl->getModelName().c_str(), properties.vendor_id, properties.product_id);
       gamepads[i] = ctl;
@@ -91,7 +107,8 @@ void onDisconnectedController(ControllerPtr ctl) {
 
   right_motor.softStop();
   left_motor.softStop();
-  digitalWrite(LED_CONNECTED, LOW); // Turn off LED when a controller is disconnected
+
+  gamepad_status = DISCONNECTED;
 
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
     if (gamepads[i] == ctl) {
@@ -106,7 +123,7 @@ void onDisconnectedController(ControllerPtr ctl) {
     Serial.println("CALLBACK: Controller disconnected, but not found in myControllers");
     right_motor.softStop();
     left_motor.softStop();
-    digitalWrite(LED_CONNECTED, LOW); // Turn off LED when a controller is disconnected
+    // digitalWrite(LED_CONNECTED, LOW); // Turn off LED when a controller is disconnected
   }
 }
 
@@ -150,7 +167,7 @@ void processGamepad(ControllerPtr gamepad) {
   }
 
   // Preserve steering ratio if motors exceed limits
-  if(abs(left_pwm) > MAX_PWM || abs(right_pwm) > MAX_PWM) {
+  if (abs(left_pwm) > MAX_PWM || abs(right_pwm) > MAX_PWM) {
     // Determine which motor is exceeding the limit
     float left_excess = static_cast<float>(abs(left_pwm)) / MAX_PWM;
     float right_excess = static_cast<float>(abs(right_pwm)) / MAX_PWM;
@@ -165,22 +182,22 @@ void processGamepad(ControllerPtr gamepad) {
   left_pwm = constrain(left_pwm, -MAX_PWM, MAX_PWM);
   right_pwm = constrain(right_pwm, -MAX_PWM, MAX_PWM);
 
-   // TODO: The joystick offset is giving -5.
+  // TODO: The joystick offset is giving -5.
 
   // Apply motor start offset for dead zone of motors
-  if(left_pwm > 0 && left_pwm < MOTOR_START_OFFSET) {
+  if (left_pwm > 0 && left_pwm < MOTOR_START_OFFSET) {
     left_pwm = MOTOR_START_OFFSET;
-  } else if(left_pwm < 0 && left_pwm > -MOTOR_START_OFFSET) {
+  } else if (left_pwm < 0 && left_pwm > -MOTOR_START_OFFSET) {
     left_pwm = -MOTOR_START_OFFSET;
   }
-  if(right_pwm > 0 && right_pwm < MOTOR_START_OFFSET) {
+  if (right_pwm > 0 && right_pwm < MOTOR_START_OFFSET) {
     right_pwm = MOTOR_START_OFFSET;
-  } else if(right_pwm < 0 && right_pwm > -MOTOR_START_OFFSET) {
+  } else if (right_pwm < 0 && right_pwm > -MOTOR_START_OFFSET) {
     right_pwm = -MOTOR_START_OFFSET;
   }
 
   // If very small values, just stop the motors completely
-  if(abs(base_pwm) < MOTOR_START_OFFSET) {
+  if (abs(base_pwm) < MOTOR_START_OFFSET) {
     left_pwm = 0;
     right_pwm = 0;
   }
@@ -249,4 +266,48 @@ int16_t getDirection(uint16_t throttle_value, uint16_t brake_value, int16_t base
     base_pwm = 0;
   }
   return base_pwm;
+}
+
+/**
+ * @brief This function is the task that controls the LED status
+ *
+ * @param parameter: The task parameter
+ */
+void ledStatusTask(void *parameter) {
+  uint8_t led_brightness = 0;
+  bool fade_direction = true; 
+
+  while (true) {
+    switch (gamepad_status) {
+      case CONNECTED:
+        if (fade_direction) {
+          led_brightness += LED_FADE_STEP;
+          if (led_brightness >= LED_MAX_DUTY) {
+            led_brightness = LED_MAX_DUTY;
+            fade_direction = false; 
+          }
+        } else {
+          if (led_brightness <= LED_FADE_STEP) {
+            led_brightness = 0;
+            fade_direction = true; 
+            vTaskDelay(200 / portTICK_PERIOD_MS);
+          } else {
+            led_brightness -= LED_FADE_STEP;
+          }
+        }
+        
+        ledcWrite(LED_PWM_CHANNEL, led_brightness);
+        
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+        break;
+        
+      case DISCONNECTED:
+      default:
+        ledcWrite(LED_PWM_CHANNEL, LED_MAX_DUTY/2); 
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        ledcWrite(LED_PWM_CHANNEL, 0);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        break;
+    }
+  }
 }

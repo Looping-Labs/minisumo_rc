@@ -21,6 +21,13 @@
 #define ACT_DEFAULT   0X0000              // ACTIONS DEFAULT value
 #define LED_CONNECTED 2                   // LED pin for connected gamepad
 
+// Definiciones para el LED con PWM
+const uint8_t LED_PWM_CHANNEL    = 2;     // Canal PWM para el LED (diferente de los motores)
+const uint16_t LED_PWM_FREQ      = 5000;  // Frecuencia PWM para el LED
+const uint8_t LED_PWM_RESOLUTION = 8;     // Resolución (8 bits: 0-255)
+const uint8_t LED_MAX_DUTY       = 255;   // Valor máximo del ciclo de trabajo
+const uint8_t LED_FADE_STEP      = 5;     // Incremento en cada paso del fade
+
 // Define motor control parameters  
 const uint16_t FREQUENCY = 10000;         // PWM frequency 10kHz
 const uint8_t RESOLUTION = 10;            // PWM resolution 10 bits (0-1023)
@@ -47,19 +54,28 @@ uint16_t throttle_value = 0;              // Throttle value (0-1020)
 int16_t brake_value     = 0;              // Brake value (0-1020)
 int16_t left_stick_x    = 0;              // Left stick X-axis value (0-1020)
 uint16_t dpad           = 0x00;           // D-PAD value (0x00-0x08)
+bool gamepad_connected  = false;          // Gamepad connection status
 
 // Define motor control variables
 int16_t left_pwm  = 0;
 int16_t right_pwm = 0;
 
-enum CONTROL_TYPE {
+enum ControllerType {
   RC = 0,
   APP
 };
+
+enum GamepadStatus {
+  DISCONNECTED = 0,
+  CONNECTED,
+  FORGOTTEN,
+};
+
+volatile GamepadStatus gamepad_status = DISCONNECTED;
 
 void onConnectedController(ControllerPtr ctl);
 void onDisconnectedController(ControllerPtr ctl);
 void processGamepad(ControllerPtr gamepad);
 int16_t applyDeadband(int16_t value, int8_t deadband_threshold, int8_t center_offset);
 int16_t applyExponentialSteering(int16_t value, float exponent, int16_t max_value);
-int16_t getDirection(uint16_t throttle_value, int16_t brake_value, int16_t base_pwm, uint16_t forward_pwm, int16_t reverse_pwm);
+int16_t getDirection(uint16_t throttle_value, uint16_t brake_value, int16_t base_pwm, uint16_t forward_pwm, uint16_t reverse_pwm);
